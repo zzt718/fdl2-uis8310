@@ -1,220 +1,240 @@
 # fdl2-uis8310
 
-面向 **展锐 UIS8310** 平台的**自研 FDL2**（Flash Download Loader 2）：一个可以在裸机上完成
-NAND 擦除 / 写入 / 读取、并通过 BSL 协议与 PC 刷机工具通信的最小实现。
+A from-scratch **FDL2** (Flash Download Loader 2) for the **Spreadtrum UIS8310** platform:
+a bare-metal implementation that erases, programs and reads NAND flash and speaks the BSL
+protocol used by PC-side flashing tools.
 
-> **English**: An independent, from-scratch reimplementation of the FDL2 stage for Spreadtrum
-> UIS8310 based devices. It initialises the NAND controller, implements the BSL command set
-> (write / read / erase / reset), computes ECC in software, and brings up its own USB device
-> stack — so it does not depend on any internal symbol of the boot ROM or of a specific FDL1.
->
-> ~27 KB, self-contained, no libc, no vendor binary.
+> **Language:** **English** | [简体中文](README.zh-CN.md)
+
+```
+~27 KB · no libc · no vendor binary · software ECC · own USB device stack
+```
 
 ---
 
-## 1. 这是什么
+## 1. What this is
 
-设备进下载模式时，PC 侧工具会分两级加载固件：
+When a device is put into download mode, the PC tool loads firmware in two stages:
 
 ```
-PC 工具  ──USB──>  BootROM  ──>  FDL1（厂家的引导下载器）  ──>  FDL2（真正干活的）
+PC tool ──USB──> BootROM ──> FDL1 (vendor boot downloader) ──> FDL2 (the one that does the work)
 ```
 
-**FDL2 是唯一真正碰闪存的那一级**：擦块、写页、读页、按 BSL 协议应答主机。
+**FDL2 is the only stage that actually touches the flash**: it erases blocks, programs pages,
+reads them back, and answers the host over the BSL protocol.
 
-本项目就是这一级的一个**独立实现**，交付形态仍是**一个 `fdl2.bin` 文件**：
+This project is an independent implementation of that stage. It is still delivered as
+**a single `fdl2.bin` file**:
 
-- 放进厂家发布包的 `dl/` 同级目录，覆盖同名文件即可；
-- 刷机工具、FDL1、驱动、bat 全部不用改；
-- 也可以被自己写的刷机脚本直接加载（本项目用 `libusb` / WinUSB 验证过）。
+- drop it into the vendor package next to `dl/`, overwriting the file of the same name;
+- the flashing tool, FDL1, drivers and `.bat` scripts stay untouched;
+- it can also be loaded by your own flashing script (validated here with `libusb` / WinUSB).
 
-## 2. 适用与不适用
+## 2. Scope
 
-| 项 | 说明 |
+| Item | Value |
 |---|---|
-| **SoC** | 展锐 **UIS8310**（Cortex-A55，ARM 32 位状态运行） |
-| **闪存** | **UNIM（至讯创新）UM19A8LISW**：SPI-NAND / SLC / 32 MB / 页 2048 / 块 128 KB（64 页）/ 备用区 78 B |
-| **设备** | 蜂助手 MIBOX-660X 系列（`EM40` 电池款、`EM313A` 充电宝款） |
-| **分区** | 只认 3 个：`KernelImg`（块 79–134）/ `UserImg`（135–203）/ `PreloadUdisk`（210–247） |
-| **不适用** | 其它 SoC、其它几何参数的闪存、其它分区布局 —— 见 [docs/06-limitations.md](docs/06-limitations.md) |
+| **SoC** | Spreadtrum **UIS8310** (Cortex-A55, running in 32-bit ARM state) |
+| **NAND** | **UNIM UM19A8LISW**: SPI-NAND, SLC, 32 MB, 2048 B page, 128 KB block (64 pages), 78 B spare |
+| **Devices** | Fengzhushou MIBOX-660X series (`EM40` battery model, `EM313A` power-bank model) |
+| **Partitions** | Only 3: `KernelImg` (blocks 79–134) / `UserImg` (135–203) / `PreloadUdisk` (210–247) |
+| **Not supported** | Other SoCs, other flash geometries, other partition layouts — see [docs/06-limitations.md](docs/06-limitations.md) |
 
-> **请先确认型号与固件版本再刷。** 本实现不校验 Flash ID、不解析分区表，
-> 它是"给已知机型用的专用工具"，不是通用刷机器。
+> **Verify model and firmware version before flashing.** This implementation does not check
+> the flash ID and does not parse the partition table. It is a purpose-built tool for known
+> devices, not a universal flasher.
 
-## 3. 为什么会有这个项目
+## 3. Why this exists
 
-原厂 FDL2 是**闭源二进制**：不能审计、不能改、不能适配新料、出问题只能靠猜。
-当需要（a）完全掌控刷写流程、（b）在没有任何官方支持的情况下排障、
-（c）把这套能力长期维护下去时，唯一可行的办法是**自己写一个**。
+The stock FDL2 is a closed-source binary: you cannot audit it, patch it, port it to a new
+flash chip, or debug it when something goes wrong. Once you need (a) full control over the
+flashing flow, (b) the ability to troubleshoot a device nobody supports any more, and
+(c) a codebase you can maintain for years, writing your own is the only option left.
 
-本项目的寄存器配置、命令序列与时序，均依据**控制器公开资料与实机验证**得出，代码全部自写；
-ECC 由**设备实测数据反推**得到（方法见 `docs/03-ecc.md`）。
+The register configuration, command sequences and timing in this project were established
+from **public controller documentation and experiments on our own hardware**; the code is
+written from scratch. The ECC mapping was **derived from data produced by the device itself**
+(see [docs/03-ecc.md](docs/03-ecc.md)).
 
-## 4. 快速开始
+## 4. Quick start
 
-### 4.1 构建
+### 4.1 Build
 
 ```bash
-# 依赖 arm-none-eabi-gcc（ARM GNU Toolchain 或 xPack 版）与 python3
+# Requires arm-none-eabi-gcc (ARM GNU Toolchain or xPack) and python3
 export PATH="/path/to/arm-none-eabi/bin:$PATH"
-./build.sh          # 若提示没有执行位（zip 解压常见），改用：bash build.sh
+./build.sh            # if the exec bit is missing (common after unzip): bash build.sh
 ```
 
-产物：
+Output:
 
 ```
-build/fdl2.bin   27 144 字节   md5 7bce7f456e2f2ce92a846ee725efe0e1
+build/fdl2.bin   27 144 bytes   md5 7bce7f456e2f2ce92a846ee725efe0e1
 ```
 
-**这个 md5 是构建可复现的校验点**：同样的工具链（GCC 15.2.1）应得到逐字节相同的结果。
-（公开版移除了若干仅用于内部排障的诊断命令，因此与早期内部构建的 27 716 字节版本略有差异；
-**刷写路径完全一致**。）
+That md5 is the reproducibility check: the same toolchain (GCC 15.2.1) should produce
+byte-identical output. (The public release drops a few internal debug commands, so it is
+572 bytes smaller than the earlier internal build; **the flashing path is identical**.)
 
-### 4.2 刷写
+### 4.2 Flash
 
-把 `build/fdl2.bin` 覆盖到发布包里的 `fdl2.bin`，然后按原来的方式刷机。
+Copy `build/fdl2.bin` over the `fdl2.bin` in your vendor package, then flash as usual.
 
-> ⚠️ **刷机前请自行备份**。BOOT1 里通常还留着原厂 FDL2，那是最可靠的救砖手段。
+> ⚠️ **Back up your device first.** BOOT1 usually still contains the stock FDL2 — it is your
+> most reliable recovery path.
 
-### 4.3 验证
+### 4.3 Verify
 
-刷完正常应当：三分区写完 → 设备**自动关机** → **手动按电源**开机 → 正常进系统。
+A successful flash looks like: three partitions written → device **powers off by itself** →
+**press the power button** → system boots normally.
 
-（本实现把 BSL `0x05 NORMAL_RESET` 实现为"关机"而不是"重启"，原因见
-[docs/06-limitations.md](docs/06-limitations.md#1-reset-只能关机不能自动重启)。）
+(This implementation maps BSL `0x05 NORMAL_RESET` to "power off" instead of "reboot";
+see [docs/06-limitations.md](docs/06-limitations.md).)
 
-## 5. 功能清单
+## 5. Features
 
-| 能力 | 状态 | 说明 |
+| Capability | Status | Notes |
 |---|---|---|
-| USB 设备层（自带） | ✅ | 控制器 `0x20200000`，EP `0x85`(IN)/`0x06`(OUT)，VID:PID `1782:4D00`，**不依赖 FDL1 内部函数** |
-| BSL 帧收发（HDLC） | ✅ | `7E` 定界、`7D5E/7D5D` 转义、16 位反码校验 |
-| `0x00` CONNECT / `0x04` EXEC | ✅ | exec 时回 `0x96 + DA_INFO`（声明 NAND 存储类型） |
-| `0x01` START_DATA | ✅ | 支持 **8 字节地址式** 与 **76 字节分区名式**（UTF-16）两种载荷 |
-| `0x02` MIDST_DATA | ✅ | 流式攒页，收满 2048 就写一页；单帧最大 **16 KB** |
-| `0x03` END_DATA | ✅ | 尾页补 `0xFF`，并补写暂存的块内页 0/1 |
-| `0x06` READ_FLASH | ✅ | 单次最多 16 KB，支持跨页拼接 |
-| `0x0A` ERASE_FLASH | ✅ | 支持地址式 / 分区名式 |
-| `0x05` NORMAL_RESET | ⚠️ | 实现为**关机**（本平台没打通"重启"） |
-| 软件 ECC | ✅ | 78 字节 OOB，2 段 × 39 字节，224 位校验，运行时展开查表 |
-| MMU + D/I-cache | ✅ | 1 MB 段映射；写页 3.58 ms/页（不开 cache 是 35 ms/页） |
-| 自定义诊断命令 | ✅ | `0xE1`–`0xFF` 一批（读寄存器、读页、读 OOB、设参数…）|
+| Own USB device stack | ✅ | Controller `0x20200000`, EP `0x85` (IN) / `0x06` (OUT), VID:PID `1782:4D00` — **no dependency on FDL1 internals** |
+| BSL framing (HDLC) | ✅ | `7E` delimiter, `7D5E`/`7D5D` escaping, 16-bit one's-complement checksum |
+| `0x00` CONNECT / `0x04` EXEC | ✅ | EXEC replies `0x96 + DA_INFO` to declare NAND storage |
+| `0x01` START_DATA | ✅ | Both the 8-byte address form and the 76-byte partition-name form (UTF-16) |
+| `0x02` MIDST_DATA | ✅ | Streams into the page buffer; up to **16 KB** per frame |
+| `0x03` END_DATA | ✅ | Pads the tail page with `0xFF`, flushes the held pages 0/1 |
+| `0x06` READ_FLASH | ✅ | Up to 16 KB per request, spans page boundaries |
+| `0x0A` ERASE_FLASH | ✅ | Address form and partition-name form |
+| `0x05` NORMAL_RESET | ⚠️ | Implemented as **power off** (reboot not solved on this platform) |
+| Software ECC | ✅ | 78-byte OOB, 2 × 39-byte segments, 224-bit parity, table expanded at boot |
+| MMU + D/I-cache | ✅ | 1 MB sections; 3.58 ms/page write (35 ms/page with caches off) |
+| Diagnostic commands | ✅ | A set of `0xE1`–`0xFF` (read registers, read page, read OOB, set parameters, …) |
 
-## 6. 目录结构
+## 6. Repository layout
 
 ```
 .
-├── build.sh               构建脚本（一条命令出镜像）
+├── build.sh               one-command build
 ├── src/
-│   ├── start.S            启动汇编（0x80100200 入口、栈、BSS 清零、跳 main）
-│   ├── main.c             全部实现（约 4600 行，文件头有分区索引）
-│   ├── fdl2.h             类型、寄存器宏、命令码
-│   ├── ecc_tab.h          ECC 递推表（生成物，224 行种子 + 系数）
-│   └── linker.ld          链接脚本（基址 0x80100000，代码从 +0x200 起）
+│   ├── start.S            entry at 0x80100200, stack, BSS clear, jump to main
+│   ├── main.c             the whole implementation (~4.5k lines, index in the file header)
+│   ├── fdl2.h             types, register macros, command codes
+│   ├── ecc_tab.h          generated: 224 seed rows + recurrence coefficients
+│   └── linker.ld          base 0x80100000, code starts at +0x200
 ├── tools/
-│   ├── mkimage.py         打 / 拆 DHTB 头
-│   └── gen_ecc_tab.py     由 ecc_map.npz 生成 src/ecc_tab.h
-└── docs/
-    ├── 01-architecture.md  总体架构、启动流程、内存布局
-    ├── 02-nand-controller.md  NFI 初始化与读/写/擦（含四个致命参数）
-    ├── 03-ecc.md           OOB 结构、ECC 映射与递推压缩
-    ├── 04-usb-bsl.md       USB 设备层与 BSL 协议、时间预算
-    ├── 05-building.md      构建细节、镜像格式、烧写与救砖
-    ├── 06-limitations.md   已知缺陷与未实现项（如实）
-    └── 07-porting.md       移植到别的 SoC / 闪存要改什么
+│   ├── mkimage.py         pack / unpack the DHTB header
+│   └── gen_ecc_tab.py     regenerate src/ecc_tab.h from ecc_map.npz
+└── docs/                  (currently written in Chinese)
+    ├── 01-architecture.md
+    ├── 02-nand-controller.md
+    ├── 03-ecc.md
+    ├── 04-usb-bsl.md
+    ├── 05-building.md
+    ├── 06-limitations.md
+    └── 07-porting.md
 ```
 
-## 7. 从哪开始读
+> The detailed design documents are currently in Chinese. English translations of the most
+> important parts are planned; the source comments are a mix of Chinese and English.
 
-| 你想做什么 | 先看 |
+## 7. Where to start
+
+| Goal | Read |
 |---|---|
-| 搞懂整体怎么跑起来 | [docs/01-architecture.md](docs/01-architecture.md) |
-| 改 NAND 读写、排查写坏页 | [docs/02-nand-controller.md](docs/02-nand-controller.md) |
-| 搞懂 ECC / OOB | [docs/03-ecc.md](docs/03-ecc.md) |
-| 接自己的刷机工具 | [docs/04-usb-bsl.md](docs/04-usb-bsl.md) |
-| 编译、烧写、救砖 | [docs/05-building.md](docs/05-building.md) |
-| 知道它有哪些坑 | [docs/06-limitations.md](docs/06-limitations.md) |
-| 换芯片 / 换机型 | [docs/07-porting.md](docs/07-porting.md) |
+| Understand how it runs | [docs/01-architecture.md](docs/01-architecture.md) |
+| Modify NAND access, debug bad writes | [docs/02-nand-controller.md](docs/02-nand-controller.md) |
+| Understand ECC / OOB | [docs/03-ecc.md](docs/03-ecc.md) |
+| Talk to it from your own tool | [docs/04-usb-bsl.md](docs/04-usb-bsl.md) |
+| Build, flash, recover | [docs/05-building.md](docs/05-building.md) |
+| Know the traps | [docs/06-limitations.md](docs/06-limitations.md) |
+| Port to another chip | [docs/07-porting.md](docs/07-porting.md) |
 
-## 8. 已测试
+## 8. Tested
 
-| 平台 | 结果 |
+| Platform | Result |
 |---|---|
-| 蜂助手 MIBOX-660X（充电宝款，`EM313A`） | ✅ 三分区完整刷写（19.24 MB / 42 秒）+ 开机正常 |
-| 自研刷机脚本（WinUSB） | ✅ 读 19.24 MB / 11.8 s，写 19.24 MB / 35.3 s |
-| 整盘 4376 页 ECC 对拍 | ✅ 与设备实测 OOB 逐页一致 |
+| Fengzhushou MIBOX-660X (power-bank model, `EM313A`) | ✅ all 3 partitions written (19.24 MB / 42 s), boots normally |
+| Own flashing script (WinUSB) | ✅ read 19.24 MB / 11.8 s, write 19.24 MB / 35.3 s |
+| Full-image ECC comparison, 4376 pages | ✅ byte-identical to the OOB the device itself produces |
 
-未在其它机型 / 其它闪存上验证。**请不要默认它能用在别的设备上。**
+Other models and other flash chips are **not** verified. Do not assume it works elsewhere.
 
-## 8.5 与通用 FDL2 的差异
+## 8.5 How it differs from a general-purpose FDL2
 
-同样是"FDL2"，定位完全不同。通用实现面向"一台工具适配很多机型"，本项目面向"一款设备的可靠刷写"：
+Both are called "FDL2", but the goals are different: a general implementation targets
+"one tool for many devices"; this one targets "reliable flashing of one device".
 
-| 维度 | 通用 FDL2（公开实现 / 厂商工具） | 本项目 |
+| Dimension | General-purpose FDL2 | This project |
 |---|---|---|
-| 目标 | 通用刷机：多机型、多闪存、多分区 | **单一机型**的三分区搬运 |
-| 体积 | 数十 KB（含 FTL / VBM / 分区表 / 全部命令） | **~27 KB** |
-| 闪存参数 | 参数表 + 运行时查表（换料免改代码） | **编译期常量**（换料要改代码） |
-| ECC | 依赖控制器硬件 ECC 引擎 | **软件计算**（78 B OOB，224 阶递推，可逐页验证） |
-| 分区 | 解析分区表、做一致性校验 | 固定 3 个分区，不解析分区表 |
-| 坏块 / FTL | 有（虚拟块映射、坏块重映射） | **无**（物理块直写，靠 ECC 纠错） |
-| 复位 | 重启 | **关机**（用户手动开机） |
-| 速度 | 更快（~0.8 ms/页） | 3.58 ms/页 |
-| 可移植性 | 同 SoC 换闪存基本免改 | 换闪存需改参数与 ECC |
-| 代码量 | 万行级 | ~4 500 行单文件 |
+| Goal | multi-device, multi-flash, multi-partition | **single device**, three partitions |
+| Size | tens of KB (FTL / VBM / partition table / full command set) | **~27 KB** |
+| Flash parameters | parameter table, looked up at runtime | **compile-time constants** |
+| ECC | controller hardware ECC engine | **computed in software** (224-order recurrence) |
+| Partitions | parses the partition table, consistency check | 3 fixed partitions, no parsing |
+| Bad blocks / FTL | yes (virtual block mapping) | **none** (direct physical access, ECC-corrected) |
+| Reset | reboot | **power off** |
+| Speed | faster (~0.8 ms/page) | 3.58 ms/page |
+| Portability | usually no code change for another flash | parameters and ECC must change |
+| Code size | tens of thousands of lines | ~4 500 lines, single file |
 
-**简单说**：通用实现是"刷机器"，本项目是"给一款设备定制的专用刷写内核"。
-换来的是代码可读、行为可预测、不依赖闭源组件；代价是通用性。
+**Where the two overlap, and where they do not:** the **only** shared part is the USB
+controller register sequence (`0x20200000` base, endpoint descriptor layout), which follows a
+public-domain project. Everything else is a different approach:
 
-**边界说明**：与公开的通用实现相比，本项目**唯一有共同点的部分是 USB 控制器的寄存器序列**
-（`0x20200000` 基址、端点描述符布局，来自公有领域项目）。其余全部是自研的不同做法：
-
-| 部分 | 通用实现 | 本项目 |
+| Part | General-purpose FDL2 | This project |
 |---|---|---|
-| 闪存参数 | `NandSpecTable` 参数表（69 条 × 56 B） | **没有表**，编译期常量 |
-| ECC | 配置控制器硬件 ECC | **软件计算**（224 阶递推查表） |
-| 写页 | 经 FTL 映射后写 | 物理块直写，4×512 扇区逐段 LOAD+EXECUTE |
-| 分区 | 解析分区表 | 固定 3 个分区常量 |
-| 加载 | 依赖引导阶段留下的收发函数 | **自带 USB 设备层**，完全独立 |
-| 复位 | 走 PMIC 命令链 | 直接置 PMIC 关机位 |
+| Flash parameters | `NandSpecTable` (69 × 56 B) | **no table**, compile-time constants |
+| ECC | configures the controller's hardware ECC | **software**, 224-order recurrence lookup |
+| Page write | through the FTL mapping | physical block direct, four 512-byte sectors, LOAD+EXECUTE each |
+| Partitions | parsed from the partition table | 3 constants |
+| Loading | reuses the send/recv helpers left by the boot stage | **own USB device stack**, fully independent |
+| Reset | walks a PMIC command chain | writes the PMIC power-off bit directly |
 
-## 9. 已知限制（摘要）
+## 9. Known limitations (summary)
 
-- 参数**硬编码**：页 2048 / 64 页每块 / OOB 78 B，换闪存即失效；
-- 只支持 3 个分区，不解析分区表、**不做 FTL / 坏块管理**；
-- `reset` 只能关机，不能自动重启；
-- 主机断开一次后，USB 端点不会重新武装（需重新插拔）；
-- 没有串口输出，排障只能靠 USB 诊断命令。
+- Flash parameters are **hard-coded** (2048 B page / 64 pages per block / 78 B OOB);
+  a different chip needs code changes.
+- Only 3 partitions; no partition table parsing; **no FTL and no bad-block management**.
+- `reset` can only power the device off, not reboot it.
+- The USB endpoints are not re-armed after the host disconnects — replug between sessions.
+- No UART output; debugging is done through USB diagnostic commands.
+- Write throughput is about 4× slower than the vendor tool.
 
-完整清单（含原因与可能的修法）见 [docs/06-limitations.md](docs/06-limitations.md)。
+Full list with causes and possible fixes: [docs/06-limitations.md](docs/06-limitations.md).
 
-## 10. 参与贡献
+## 10. Contributing
 
-欢迎 fork。改动前请先看 `docs/06-limitations.md` 与各文档里的"踩坑记录"——
-里面很多条是**实测证伪**的结论，重复试一遍只会浪费你的时间。
+Forks and pull requests are welcome. Before changing anything, read
+[docs/06-limitations.md](docs/06-limitations.md) and the "traps" sections in the other
+documents — many of them are **empirically disproved** approaches, and repeating them only
+wastes your time.
 
-提交 PR 时请附：
+Please include in a PR:
 
-1. 改了哪一层（USB / BSL / NAND / ECC / 参数）；
-2. **构建后的 `md5sum build/fdl2.bin`**（便于判断是否影响了已有路径）；
-3. 上机验证条件（机型、板号、闪存、刷了哪些分区）。
+1. which layer you touched (USB / BSL / NAND / ECC / parameters);
+2. the **`md5sum build/fdl2.bin`** after your change (so we can tell whether existing paths
+   were affected);
+3. the test conditions (model, board revision, flash chip, partitions written).
 
-## 11. 许可与来源
+**Please do not submit code you did not write or that comes from an unknown source.**
+Contributions must be your own work and licensed under the project license.
 
-- **许可：Unlicense（公有领域）**，见 [LICENSE](LICENSE)。可自由使用、修改、商用、闭源再发布，
-  无附加义务。
+## 11. License and provenance
 
-- **代码来源**：本仓库全部代码为本项目自写。寄存器配置、命令序列与时序依据控制器公开资料
-  与实机验证得出；ECC 由设备实测数据反推（方法见 `docs/03-ecc.md`）。
+- **License: Unlicense (public domain)** — see [LICENSE](LICENSE). Use it, modify it, sell it,
+  relicense it, no obligations.
+- **Code provenance:** all code here is written for this project. Register configuration,
+  command sequences and timing come from public controller documentation and from
+  experiments on our own hardware; the ECC mapping is derived from data measured on the
+  device.
+- **Acknowledgement:** the USB controller register sequence (`0x20200000`, endpoint
+  descriptor layout) follows the public-domain project
+  [`ilyakurdyukov/spreadtrum_flash`](https://github.com/ilyakurdyukov/spreadtrum_flash)
+  (Unlicense). This project's USB layer is a substantial rewrite on top of it: own HDLC
+  framing and checksum, 32 KB receive buffer, and no dependency on the boot stage.
+- No closed-source binary or fragment thereof is included; the repository contains only
+  C/assembly sources, build scripts and documentation.
 
-- **致谢**：USB 控制器（`0x20200000`、端点描述符布局）的寄存器序列参考了公有领域项目
-  `ilyakurdyukov/spreadtrum_flash`（Unlicense）。本项目的 USB 层在该基础上做了较大改写：
-  自带 HDLC 分帧与校验、32 KB 收发缓冲、与引导阶段完全解耦。采用 Unlicense 也是与该项目的
-  许可保持一致。
+## 12. Disclaimer
 
-- **不包含**任何闭源二进制或其片段；本仓库只有 C/汇编源码、构建脚本与文档。
-
-## 12. 免责声明
-
-刷机会改动设备分区。**使用本工具造成的一切后果由使用者自负**，作者不提供任何担保。
-请务必先备份、先在小批量设备上验证，并保留原厂 FDL2 作为救砖手段。
+Flashing modifies device partitions. **You are responsible for any consequences of using this
+tool**; the authors provide no warranty of any kind. Back up first, validate on a small batch,
+and keep the stock FDL2 as a recovery option.

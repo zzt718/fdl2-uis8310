@@ -28,12 +28,11 @@ CROSS=/opt/arm-gnu-toolchain/bin/arm-none-eabi- ./build.sh
 ### 1.2 可复现性
 
 ```
-build/fdl2.bin   27 716 字节
-md5              7e47163dac221265bfbfc243a9e1677a
+build/fdl2.bin   27 144 字节
+md5              7bce7f456e2f2ce92a846ee725efe0e1
 ```
 
 **同版本工具链应当逐字节一致。** 若不一致，先确认 GCC 版本；再确认没有改过 `src/`。
-（这个 md5 是长期验证过的发布基线，改动源码后它会变，属正常。）
 
 ## 2. 镜像格式：DHTB
 

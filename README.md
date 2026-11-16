@@ -57,7 +57,7 @@ PC 工具  ──USB──>  BootROM  ──>  FDL1（厂家的引导下载器�
 ```bash
 # 依赖 arm-none-eabi-gcc（ARM GNU Toolchain 或 xPack 版）与 python3
 export PATH="/path/to/arm-none-eabi/bin:$PATH"
-./build.sh
+./build.sh          # 若提示没有执行位（zip 解压常见），改用：bash build.sh
 ```
 
 产物：
